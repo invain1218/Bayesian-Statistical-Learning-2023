@@ -1,0 +1,173 @@
+---
+title: "Assignment 3"
+header-includes:
+   - \usepackage{bm}
+   - \usepackage{amsmath}
+output: 
+  html_document:
+    number_sections: no
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# glm
+
+```{r results='asis'}
+x <-0:6 
+y<-c(3,5,4,4,7,6,8)
+n<-10 
+pred.mat <-cbind(rep(1,length(y)),x) 
+modest <-glm(cbind(y,n-y)~x,family=binomial('logit'))
+sigma <-vcov(modest)
+modest$coefficients
+```
+
+# Metropolis-Hasting algorithm
+
+```{r results='asis'}
+Metropolis_Hastings <- function(y, n, X, Sigma, iter, burnin) {
+  library(mvtnorm)
+  p <- dim(X)[2]
+  theta0 <- rnorm(p)
+  theta.sim <- matrix(0, iter, p)
+  theta.sim[1, ] <- theta0
+  for (i in 2:iter) {
+    theta.cand <- rmvnorm(1, mean = theta.sim[i - 1, ], sigma = Sigma)
+    theta.cand <- as.numeric(theta.cand)
+    xbc <- X %*% theta.cand
+    p.c <- (1 + exp(-xbc))^(-1)
+    xb <- X %*% theta.sim[i - 1, ]
+    p.b <- (1 + exp(-xb))^(-1)
+    log_ratio <- sum(dbinom(y, size = n, prob = p.c, log = TRUE) - dbinom(y, size = n, prob = p.b, log = TRUE))
+    acceptance_prob <- exp(min(0, log_ratio))
+    if (runif(1) < acceptance_prob) {
+      theta.sim[i, ] <- theta.cand
+    } else {
+      theta.sim[i, ] <- theta.sim[i - 1, ]
+    }
+  }
+  results <- theta.sim[-c(1:burnin), ]
+  colnames(results) <- c('beta0', 'beta1')
+  return(results)
+}
+
+mh <- Metropolis_Hastings(y = y, n = n, X = pred.mat, Sigma = sigma, iter = 10000, burnin = 1000)
+colMeans(mh)
+```
+
+# HMC algorithm
+
+```{r results='asis'}
+HMC.fn<-function(y,n,X,L,M,iter,burnin){
+  p <-dim(X)[2] 
+  library(mvtnorm)
+  theta0<-rnorm(p)
+  theta.sim<-matrix(0,iter,p) 
+  theta.sim[1,1:p]<-theta0 
+  epsilon<-1/L 
+  Minv <-solve(M)
+  for(i in 1:(iter-1)){
+    phi <-rmvnorm(1,mean=rep(0,p),sigma=M) 
+    phi <-as.numeric(phi)
+    phi0 <-phi 
+    theta <-theta.sim[i,1:p] 
+    p.b <-(1+exp(-X%*%theta))^(-1) 
+    gradtheta <- crossprod(X,y-n*p.b)
+    for(j in 1:L){
+      phi <- phi + 0.5*epsilon*gradtheta 
+      theta <- theta + epsilon*(Minv%*%phi)
+      p.c <-(1+exp(-X%*%theta))^(-1) 
+      gradtheta <- crossprod(X,y-n*p.c)
+      phi <- phi + 0.5*epsilon*gradtheta
+      phi <- as.numeric(phi)
+}
+    r<-sum( dbinom(y,size=n,prob=p.c,log=TRUE))+dmvnorm(phi,mean=rep(0,p),sigma=M,log=TRUE)- sum(dbinom(y,size=n,prob=p.b,log=TRUE)
+                                                          )-dmvnorm(phi0,mean=rep(0,p),sigma=M,log=TRUE)
+    ind<-rbinom(1,1,exp( min(c(r,0)) ) )
+    theta.sim[i+1,]<- ind*theta + (1-ind)*theta.sim[i,]
+    }
+  results<-theta.sim[-c(1:burnin),]
+  names(results)<-c('beta0','beta1')
+  return(results)
+}
+
+M <- 1*solve(sigma)
+HMC<-HMC.fn(y=y,n=n,X=pred.mat,L=1,M=M,iter=10000,burnin=1000)
+colMeans(HMC)
+```
+
+# expectation-propagation algorithm
+
+```{r results='asis'}
+EP.logit<-function(response,n,X,iter,epsilon){
+  N<-length(response)
+  p<-dim(X)[2]
+  Sigmainvmu <-matrix(0,p,N) 
+  Sigmainv <-rep(list(diag(p)),N)
+  Sigmainvmu0<-rowSums(Sigmainvmu)
+  Sigmainv0 <-Reduce("+",Sigmainv)
+  tilt.dist <- function(x){
+    gnoti <-dnorm(x,mean=Mnoti,sd=sqrt(Vnoti))
+    pr <-(1+exp(-x))^(-1)
+    like <-dbinom(response[i],n[i],pr)
+    result <-gnoti*like
+    return(result)
+    }
+  for(j in 1:iter){
+    for(i in 1:N){
+      Sigmainvmunoti <-rowSums(Sigmainvmu) - Sigmainvmu[,i]  
+      Sigmainvnoti <-Reduce("+",Sigmainv) - Sigmainv[[i]]  
+      Sigmanoti <-solve(Sigmainvnoti) 
+      munoti <-Sigmanoti%*%Sigmainvmunoti 
+      Mnoti <-t(X[i,])%*%munoti 
+      Vnoti <-t(X[i,])%*%Sigmanoti%*%X[i,] 
+      E0<-integrate(f=function(x){tilt.dist(x)},
+                    lower=Mnoti-10*sqrt(Vnoti),
+                    upper=Mnoti+10*sqrt(Vnoti))
+      E1<-integrate(f=function(x){x*tilt.dist(x)},
+                    lower=Mnoti-10*sqrt(Vnoti),
+                    upper=Mnoti+10*sqrt(Vnoti))
+      E2<-integrate(f=function(x){x^2*tilt.dist(x)},lower=Mnoti-10*sqrt(Vnoti), upper=Mnoti+10*sqrt(Vnoti))
+      M <- E1$value/E0$value
+      V <- E2$value/E0$value - M^2
+      MiViinv <- M/V - Mnoti/Vnoti
+      Viinv <- 1/V - 1/Vnoti
+      Sigmainvmu[,i] <-X[i,]%*%MiViinv 
+      Sigmainv[[i]] <-X[i,]%*%Viinv%*%t(X[i,])
+      }
+    currentSinvmu <-rowSums(Sigmainvmu)
+    currentSinv <-Reduce("+",Sigmainv)
+    diff1 <- sqrt((currentSinvmu-Sigmainvmu0)^2)/(abs(currentSinvmu)+0.01)
+    diff2 <- sqrt((currentSinv-Sigmainv0)^2)/(abs(currentSinv)+0.01)
+    diff.all<-c(diff1,diff2)
+    if(max(diff.all) < epsilon) break else Sigmainvmu0 <-
+      currentSinvmu; Sigmainv0 <- currentSinv}
+  Sigma <-solve(currentSinv)
+  mu <-Sigma%*%currentSinvmu
+  param<-list(mu,Sigma,j)
+  names(param)<-c('betahat','Sigma','iter_break')
+  return(param)
+}
+
+N<-length(y)
+X<-cbind(rep(1,N),x)
+mresult<-EP.logit(response=y,n=rep(n,N),X=X,iter=100,epsilon=1e-6)
+print(mresult)
+```
+# Comparing
+
+```{r}
+par(mfrow=c(1,2))
+for(i in 1:2){
+  plot(density(mh[,i]),xlab=bquote(beta[.(i-1)]),main='Comparing approximations',cex.lab=1.5)
+  curve(dnorm(x,mean=modest$coef[i],sd=sqrt(vcov(modest)[i,i])),add=TRUE,col=2)
+  curve(dnorm(x,mean=mresult$betahat[i],sd=sqrt(mresult$Sigma[i,i])),add=TRUE,col=3)
+  line(density(HMC[,i]))
+legend('topleft',legend=c('Metropolis-Hasting','normal approximation','Expectation propagation','HMC'),
+col=1:3,lty=1,bty='n',cex=0.7)
+}
+```
+
+
